@@ -1,0 +1,6 @@
+# firmware build outputs
+firmware/*.elf
+firmware/*.bin
+firmware/*.map
+# test screenshots
+*.png

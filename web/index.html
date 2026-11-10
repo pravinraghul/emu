@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cortex-M Hello World</title>
+  <link rel="stylesheet" href="vendor/xterm.css">
+  <style>
+    :root { --bg: #ffffff; --fg: #1f2328; --muted: #59636e; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1; } }
+    body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+           font: 14px/1.4 system-ui, sans-serif; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    #status { color: var(--muted); margin: 0 0 12px; }
+    #terminal { max-width: 900px; }
+  </style>
+</head>
+<body>
+  <h1>Generic Cortex-M on QEMU-Wasm</h1>
+  <p id="status">Loading emulator…</p>
+  <div id="terminal"></div>
+
+  <script src="vendor/xterm.js"></script>
+  <script src="vendor/xterm-pty.js"></script>
+  <script type="module">
+    import initEmscriptenModule from './qemu-system-arm.js';
+
+    const status = document.getElementById('status');
+    const params = new URLSearchParams(location.search);
+    const cpu = params.get('cpu') || 'cortex-m3';
+    const firmwareUrl = params.get('fw') || 'hello.elf';
+
+    const xterm = new Terminal({ convertEol: false, rows: 20 });
+    xterm.open(document.getElementById('terminal'));
+    const { master, slave } = openpty();
+    xterm.loadAddon(master);
+
+    const firmware = new Uint8Array(await (await fetch(firmwareUrl)).arrayBuffer());
+
+    const Module = {
+      pty: slave,
+      mainScriptUrlOrBlob: new URL('qemu-system-arm.js', location.href).href,
+      arguments: [
+        '-M', 'generic-cortex-m', '-cpu', cpu,
+        '-nographic', '-monitor', 'none',
+        '-accel', 'tcg,tb-size=64',
+        '-kernel', '/firmware.elf',
+      ],
+      preRun: [(m) => m.FS.writeFile('/firmware.elf', firmware)],
+    };
+
+    const instance = await initEmscriptenModule(Module);
+    // xterm-pty: report "not readable" instead of blocking when no key is pending
+    const oldPoll = instance.TTY.stream_ops.poll;
+    instance.TTY.stream_ops.poll = function (stream, timeout) {
+      if (!slave.readable) {
+        return (slave.readable ? 1 : 0) | (slave.writable ? 4 : 0);
+      }
+      return oldPoll.call(stream, timeout);
+    };
+    status.textContent = `Running ${firmwareUrl} on ${cpu} (machine: generic-cortex-m)`;
+  </script>
+</body>
+</html>

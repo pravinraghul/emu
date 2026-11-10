@@ -1,0 +1,222 @@
+diff --git a/configs/devices/arm-softmmu/cortex-m.mak b/configs/devices/arm-softmmu/cortex-m.mak
+new file mode 100644
+index 0000000..2e3ae61
+--- /dev/null
++++ b/configs/devices/arm-softmmu/cortex-m.mak
+@@ -0,0 +1,3 @@
++# Minimal device set: only the generic Cortex-M machine.
++# Use with: configure --without-default-devices --with-devices-arm=cortex-m
++CONFIG_GENERIC_CORTEX_M=y
+diff --git a/hw/arm/Kconfig b/hw/arm/Kconfig
+index 3ada335..8d07094 100644
+--- a/hw/arm/Kconfig
++++ b/hw/arm/Kconfig
+@@ -679,3 +679,10 @@ config ARMSSE
+     select UNIMP
+     select SSE_COUNTER
+     select SSE_TIMER
++
++config GENERIC_CORTEX_M
++    bool
++    default y
++    depends on TCG && ARM
++    select ARM_V7M
++    select CMSDK_APB_UART
+diff --git a/hw/arm/generic-cortex-m.c b/hw/arm/generic-cortex-m.c
+new file mode 100644
+index 0000000..051e025
+--- /dev/null
++++ b/hw/arm/generic-cortex-m.c
+@@ -0,0 +1,180 @@
++/*
++ * Generic Cortex-M machine
++ *
++ * A minimal, board-independent Arm M-profile system intended for firmware
++ * bring-up (and for running inside the browser via QEMU-Wasm). It contains
++ * only what a "hello world" needs:
++ *
++ *   0x00000000  Flash  (default 256 KiB, "flash-size" property)  -- vectors here
++ *   0x20000000  SRAM   (default 64 KiB, set with -m)
++ *   0x40004000  UART0  (Arm CMSDK APB UART, NVIC IRQ 0, wired to serial0)
++ *
++ * The NVIC, SysTick and (on cores that have them) MPU/FPU are part of the
++ * CPU core and always present. Any other address is unmapped and faults.
++ *
++ * CPU defaults to Cortex-M3; select another with -cpu (cortex-m0, -m4, -m7,
++ * -m33). Usage:
++ *
++ *   qemu-system-arm -M generic-cortex-m -nographic -kernel firmware.elf
++ *
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/units.h"
++#include "qapi/error.h"
++#include "qapi/visitor.h"
++#include "hw/boards.h"
++#include "hw/sysbus.h"
++#include "hw/qdev-properties.h"
++#include "hw/qdev-clock.h"
++#include "hw/arm/boot.h"
++#include "hw/arm/armv7m.h"
++#include "hw/char/cmsdk-apb-uart.h"
++#include "sysemu/sysemu.h"
++#include "exec/address-spaces.h"
++#include "qom/object.h"
++
++#define GCM_FLASH_BASE      0x00000000
++#define GCM_SRAM_BASE       0x20000000
++#define GCM_UART0_BASE      0x40004000
++#define GCM_UART0_IRQ       0
++
++#define GCM_SYSCLK_HZ       25000000    /* core and UART clock: 25 MHz */
++#define GCM_REFCLK_HZ       1000000     /* SysTick reference clock: 1 MHz */
++#define GCM_NUM_IRQ         32
++
++#define GCM_DEFAULT_FLASH   (256 * KiB)
++#define GCM_DEFAULT_SRAM    (64 * KiB)
++#define GCM_MAX_FLASH       (64 * MiB)
++
++#define TYPE_GENERIC_CORTEX_M_MACHINE MACHINE_TYPE_NAME("generic-cortex-m")
++OBJECT_DECLARE_SIMPLE_TYPE(GenericCortexMMachineState, GENERIC_CORTEX_M_MACHINE)
++
++struct GenericCortexMMachineState {
++    MachineState parent;
++
++    ARMv7MState armv7m;
++    CMSDKAPBUART uart0;
++    MemoryRegion flash;
++    Clock *sysclk;
++    Clock *refclk;
++    uint64_t flash_size;
++};
++
++static void gcm_init(MachineState *machine)
++{
++    GenericCortexMMachineState *s = GENERIC_CORTEX_M_MACHINE(machine);
++    MemoryRegion *sysmem = get_system_memory();
++    DeviceState *armv7m, *uart;
++
++    s->sysclk = clock_new(OBJECT(machine), "SYSCLK");
++    clock_set_hz(s->sysclk, GCM_SYSCLK_HZ);
++    s->refclk = clock_new(OBJECT(machine), "REFCLK");
++    clock_set_hz(s->refclk, GCM_REFCLK_HZ);
++
++    /* Flash: modelled as read-only from the guest's view, loaded by -kernel */
++    memory_region_init_rom(&s->flash, NULL, "generic-cortex-m.flash",
++                           s->flash_size, &error_fatal);
++    memory_region_add_subregion(sysmem, GCM_FLASH_BASE, &s->flash);
++
++    /* SRAM: the machine's main RAM, sized with -m */
++    memory_region_add_subregion(sysmem, GCM_SRAM_BASE, machine->ram);
++
++    /* CPU core + NVIC + SysTick */
++    object_initialize_child(OBJECT(s), "armv7m", &s->armv7m, TYPE_ARMV7M);
++    armv7m = DEVICE(&s->armv7m);
++    qdev_prop_set_uint32(armv7m, "num-irq", GCM_NUM_IRQ);
++    qdev_prop_set_string(armv7m, "cpu-type", machine->cpu_type);
++    qdev_connect_clock_in(armv7m, "cpuclk", s->sysclk);
++    qdev_connect_clock_in(armv7m, "refclk", s->refclk);
++    object_property_set_link(OBJECT(&s->armv7m), "memory", OBJECT(sysmem),
++                             &error_abort);
++    sysbus_realize(SYS_BUS_DEVICE(&s->armv7m), &error_fatal);
++
++    /* UART0 -> first serial backend (stdio with -nographic / -serial) */
++    object_initialize_child(OBJECT(s), "uart0", &s->uart0, TYPE_CMSDK_APB_UART);
++    uart = DEVICE(&s->uart0);
++    qdev_prop_set_chr(uart, "chardev", serial_hd(0));
++    qdev_prop_set_uint32(uart, "pclk-frq", GCM_SYSCLK_HZ);
++    sysbus_realize(SYS_BUS_DEVICE(&s->uart0), &error_fatal);
++    sysbus_mmio_map(SYS_BUS_DEVICE(&s->uart0), 0, GCM_UART0_BASE);
++    /* sysbus IRQ 4 is the combined UARTINT (TX | RX | overrun) */
++    sysbus_connect_irq(SYS_BUS_DEVICE(&s->uart0), 4,
++                       qdev_get_gpio_in(armv7m, GCM_UART0_IRQ));
++
++    armv7m_load_kernel(ARM_CPU(first_cpu), machine->kernel_filename,
++                       GCM_FLASH_BASE, s->flash_size);
++}
++
++static void gcm_get_flash_size(Object *obj, Visitor *v, const char *name,
++                               void *opaque, Error **errp)
++{
++    GenericCortexMMachineState *s = GENERIC_CORTEX_M_MACHINE(obj);
++
++    visit_type_size(v, name, &s->flash_size, errp);
++}
++
++static void gcm_set_flash_size(Object *obj, Visitor *v, const char *name,
++                               void *opaque, Error **errp)
++{
++    GenericCortexMMachineState *s = GENERIC_CORTEX_M_MACHINE(obj);
++    uint64_t value;
++
++    if (!visit_type_size(v, name, &value, errp)) {
++        return;
++    }
++    if (value == 0 || value > GCM_MAX_FLASH || (value & 0x3ff)) {
++        error_setg(errp, "flash-size must be a non-zero multiple of 1 KiB "
++                   "and at most %" PRIu64 " MiB", (uint64_t)GCM_MAX_FLASH / MiB);
++        return;
++    }
++    s->flash_size = value;
++}
++
++static void gcm_instance_init(Object *obj)
++{
++    GENERIC_CORTEX_M_MACHINE(obj)->flash_size = GCM_DEFAULT_FLASH;
++}
++
++static void gcm_class_init(ObjectClass *oc, void *data)
++{
++    MachineClass *mc = MACHINE_CLASS(oc);
++    static const char * const valid_cpu_types[] = {
++        ARM_CPU_TYPE_NAME("cortex-m0"),
++        ARM_CPU_TYPE_NAME("cortex-m3"),
++        ARM_CPU_TYPE_NAME("cortex-m4"),
++        ARM_CPU_TYPE_NAME("cortex-m7"),
++        ARM_CPU_TYPE_NAME("cortex-m33"),
++        NULL
++    };
++
++    mc->desc = "Generic Cortex-M (flash, SRAM, one CMSDK UART)";
++    mc->init = gcm_init;
++    mc->max_cpus = 1;
++    mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-m3");
++    mc->valid_cpu_types = valid_cpu_types;
++    mc->default_ram_size = GCM_DEFAULT_SRAM;
++    mc->default_ram_id = "generic-cortex-m.sram";
++
++    object_class_property_add(oc, "flash-size", "size",
++                              gcm_get_flash_size, gcm_set_flash_size,
++                              NULL, NULL);
++    object_class_property_set_description(oc, "flash-size",
++        "Size of the flash at 0x00000000 (default 256K)");
++}
++
++static const TypeInfo gcm_info = {
++    .name = TYPE_GENERIC_CORTEX_M_MACHINE,
++    .parent = TYPE_MACHINE,
++    .instance_size = sizeof(GenericCortexMMachineState),
++    .instance_init = gcm_instance_init,
++    .class_init = gcm_class_init,
++};
++
++static void gcm_machine_init(void)
++{
++    type_register_static(&gcm_info);
++}
++
++type_init(gcm_machine_init);
+diff --git a/hw/arm/meson.build b/hw/arm/meson.build
+index 68245d3..675163d 100644
+--- a/hw/arm/meson.build
++++ b/hw/arm/meson.build
+@@ -8,6 +8,7 @@ arm_ss.add(when: 'CONFIG_HIGHBANK', if_true: files('highbank.c'))
+ arm_ss.add(when: 'CONFIG_INTEGRATOR', if_true: files('integratorcp.c'))
+ arm_ss.add(when: 'CONFIG_MAINSTONE', if_true: files('mainstone.c'))
+ arm_ss.add(when: 'CONFIG_MICROBIT', if_true: files('microbit.c'))
++arm_ss.add(when: 'CONFIG_GENERIC_CORTEX_M', if_true: files('generic-cortex-m.c'))
+ arm_ss.add(when: 'CONFIG_MUSICPAL', if_true: files('musicpal.c'))
+ arm_ss.add(when: 'CONFIG_NETDUINO2', if_true: files('netduino2.c'))
+ arm_ss.add(when: 'CONFIG_NETDUINOPLUS2', if_true: files('netduinoplus2.c'))
