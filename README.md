@@ -34,8 +34,10 @@ scripts/    build-wasm-deps.sh   zlib, libffi, pcre2, glib for Emscripten
             build-qemu-wasm.sh   qemu-system-arm.{js,wasm,worker.js} into web/
             serve.py             dev server with the COOP/COEP headers
             browser-test.mjs     headless-Chromium check for "Hello World"
-web/        index.html, vendor/ (xterm.js, xterm-pty), emulator and firmware
+web/        index.html, vendor/ (xterm.js, xterm-pty), prebuilt emulator and hello.elf
 ```
+
+`web/` includes a prebuilt `qemu-system-arm.wasm` (9 MB, about 2 MB gzipped), so you can run `scripts/serve.py` right away without the emulator build.
 
 ## Build and run
 

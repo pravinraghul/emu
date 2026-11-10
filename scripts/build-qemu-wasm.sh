@@ -53,5 +53,7 @@ emmake make -j"$(nproc)" qemu-system-arm
 # 4. copy to web/
 mkdir -p "$REPO/web"
 cp qemu-system-arm "$REPO/web/qemu-system-arm.js"
-cp qemu-system-arm.wasm qemu-system-arm.worker.js "$REPO/web/"
+cp qemu-system-arm.worker.js "$REPO/web/"
+# drop DWARF debug info: ~30 MB -> ~9 MB (~2 MB gzipped)
+"$EMSDK/upstream/bin/llvm-strip" --strip-debug qemu-system-arm.wasm -o "$REPO/web/qemu-system-arm.wasm"
 ls -la "$REPO/web"/qemu-system-arm.*
